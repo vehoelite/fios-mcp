@@ -46,9 +46,11 @@ Identical requests return `result: "no_change"` without writing.
 
 ## Refused entirely
 
-Factory reset, firmware upgrade, admin password changes, enabling remote
-administration, Wi-Fi changes and LAN subnet changes have no tools. They are
-one-off, high-blast-radius operations better done in the web UI.
+Factory reset, firmware upgrade, admin password changes and enabling remote
+administration have no tools: one-off, high-blast-radius operations better
+done in the web UI. Moving the LAN (`set_lan_settings`) exists but is off
+unless `policy.toml` sets `allow_lan_change = true`; because the router moves,
+it reports the new address instead of a read-back.
 
 ## Session discipline
 

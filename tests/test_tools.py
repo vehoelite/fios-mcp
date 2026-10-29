@@ -275,7 +275,7 @@ async def test_snapshot_diff_and_desired_state(router, tmp_path):
 async def test_tool_catalogue():
     tools = await server.mcp.list_tools()
     names = {t.name for t in tools}
-    assert len(tools) == 38
+    assert len(tools) == 41
     tplink_names = {"router_status", "router_firmware", "router_diagnostics", "list_connected_devices",
                     "list_port_forwarding", "add_port_forwarding", "delete_port_forwarding",
                     "list_dhcp_reservations", "add_dhcp_reservation", "delete_dhcp_reservation", "reboot_router"}
@@ -283,3 +283,75 @@ async def test_tool_catalogue():
     for t in tools:
         if t.name.startswith(("list_", "get_", "router_")):
             assert t.annotations and t.annotations.read_only_hint, t.name
+
+
+# -- Wi-Fi -------------------------------------------------------------------------------
+
+async def test_wifi_summary_has_radios_and_no_keys(router):
+    out = await server.get_wifi_summary()
+    assert out["ok"] and out["data"]["radios"] == {"2.4GHz": True, "5GHz": True, "6GHz": True}
+    assert "wifi-secret" not in json.dumps(out)
+
+
+async def test_wifi_radio_off_and_on(router):
+    pre = await server.set_wifi_radio("all", False)
+    assert pre["preview"] and any("mesh" in w for w in pre["warnings"])
+    out = await two_phase(server.set_wifi_radio, band="all", enabled=False)
+    assert out["ok"] and out["verified"] and router.cfg["Wireless_enable6G"] == "0"
+    assert router.actions[-1] == ("ui_wireless_single", "")
+    assert (await server.set_wifi_radio("all", False))["result"] == "no_change"
+    assert (await two_phase(server.set_wifi_radio, band="6GHz", enabled=True))["verified"]
+    assert router.cfg["Wireless_enable6G"] == "1" and router.cfg["Wireless_enable24G"] == "0"
+
+
+async def test_wifi_network_change_verifies_key_without_returning_it(router):
+    out = await two_phase(server.set_wifi_network, network="primary", band="2.4GHz", ssid="new-net",
+                          password="a-new-wifi-key")
+    assert out["ok"] and out["verified"], out
+    assert any("mesh (SON)" in w for w in out["warnings"])
+    assert router.cfg["wl_ssid5G_H"] == "new-net"  # mirrored by mesh, like the real router
+    assert "a-new-wifi-key" not in json.dumps(out)
+    bad = await server.set_wifi_network("primary", password="short")
+    assert not bad["ok"] and "8-63" in bad["errors"][0]
+    guest = await two_phase(server.set_wifi_network, network="guest", enabled=True)
+    assert guest["verified"] and router.actions[-1] == ("ui_wireless_singleradio", "1")
+
+
+async def test_wifi_policy(router):
+    server.rt.service.policy.allow_wifi = False
+    out = await server.set_wifi_radio("2.4GHz", False)
+    assert not out["ok"] and "allow_wifi" in out["errors"][0]
+
+
+# -- LAN ------------------------------------------------------------------------------
+
+async def test_lan_change_refused_by_default(router):
+    out = await server.set_lan_settings("192.168.0.1")
+    assert not out["ok"] and "allow_lan_change" in out["errors"][0]
+
+
+async def test_lan_move_preview_lists_stranded_entries(router):
+    server.rt.service.policy.allow_lan_change = True
+    await two_phase(server.add_dhcp_reservation, mac="02:00:00:00:00:10", ip="192.168.1.60", name="nas")
+    await two_phase(server.add_static_route, destination="10.99.0.0/24", gateway="192.168.1.11")
+    pre = await server.set_lan_settings("192.168.0.1")
+    assert pre["preview"]
+    text = " ".join(pre["warnings"])
+    assert "https://192.168.0.1/" in text and "02:00:00:00:00:10" in text and "10.99.0.0/24" in text
+    out = await server.set_lan_settings("192.168.0.1", confirm=True, expected_etag=pre["state_etag"])
+    assert out["ok"] and out["moved_to"] == "https://192.168.0.1"
+    assert router.cfg["lan_ip"] == "192.168.0.1" and router.cfg["dhcp_start_ip"] == "192.168.0.2"
+    assert (router.cfg["dhcp_opt60_src_0_0"], router.cfg["dhcp_opt60_dst_0_0"]) == ("192.168.0.100",
+                                                                                   "192.168.0.150")
+    assert router.actions[-1] == ("ui_verizon_network_settings", "010")
+
+
+async def test_lan_validation(router):
+    server.rt.service.policy.allow_lan_change = True
+    out = await server.set_lan_settings("192.168.1.50", dhcp_start="192.168.1.2", dhcp_end="192.168.1.254")
+    assert not out["ok"] and "outside the DHCP pool" in " ".join(out["errors"])
+    out = await server.set_lan_settings("192.168.1.1", dhcp_start="192.168.1.100", dhcp_end="192.168.1.150")
+    assert not out["ok"] and ".100-.150" in " ".join(out["errors"])
+    out = await two_phase(server.set_lan_settings, ip="192.168.1.1", dhcp_start="192.168.1.2",
+                          dhcp_end="192.168.1.99")
+    assert out["ok"] and out["verified"] and router.cfg["dhcp_end_ip"] == "192.168.1.99"

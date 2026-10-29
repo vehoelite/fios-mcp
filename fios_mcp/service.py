@@ -13,6 +13,7 @@ Every mutating operation goes through `Service._change`:
 from __future__ import annotations
 
 import hashlib
+import inspect
 import ipaddress
 import json
 import os
@@ -20,7 +21,7 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .backend.stock.backend import StockBackend, in_verizon_reserved_range
+from .backend.stock.backend import WIFI_BANDS, StockBackend, in_verizon_reserved_range
 from .backend.stock.transport import AuthError, RouterError
 from .models import DhcpReservation, PortForward, StaticRoute, normalize_mac
 from .policy import Policy
@@ -130,6 +131,8 @@ class Service:
                     f"router page no longer has field {e}; firmware may have changed - refusing"])
             after = await read_state()
             ok = verify(after)
+            if inspect.isawaitable(ok):
+                ok = await ok
             return self.env(ok, after, warnings=warnings, action=action, verified=ok,
                             errors=[] if ok else ["write sent but read-back does not show the change"])
         except (RouterError, AuthError, ValueError) as e:
@@ -460,3 +463,176 @@ class Service:
             return self.env(True, action="reboot router", result="reboot requested; expect ~4 minutes down")
         except (RouterError, AuthError) as e:
             return self.env(False, errors=[str(e)])
+
+    # -- Wi-Fi -------------------------------------------------------------
+
+    async def set_wifi_radio(self, band: str, enabled: bool, *, confirm: bool = False,
+                             expected_etag: str | None = None) -> dict[str, Any]:
+        bands = list(WIFI_BANDS) if band == "all" else [band]
+
+        def plan(cur: dict[str, Any]) -> tuple[list[str], list[str], bool]:
+            errs = [] if self.policy.allow_wifi else ["Wi-Fi changes are disabled by policy (features.allow_wifi)"]
+            if any(b not in WIFI_BANDS for b in bands):
+                errs.append(f"band must be one of {', '.join(WIFI_BANDS)} or 'all'")
+                return errs, [], False
+            warns = ["the router restarts Wi-Fi: this call takes 1-2 minutes"]
+            if not enabled:
+                warns.append(f"every device on {', '.join(bands)} will be disconnected")
+                if cur["mesh_enabled"]:
+                    warns.append("Verizon mesh extenders lose their wireless link on bands that are switched off")
+            return errs, warns, all(cur["radios"][b] == enabled for b in bands)
+
+        return await self._change(
+            action=f"turn {'on' if enabled else 'off'} Wi-Fi radio {band}", read_state=self.b.wifi_state,
+            plan=plan, apply=lambda: self.b.set_wifi_radio(band, enabled),
+            verify=lambda after: all(after["radios"][b] == enabled for b in bands),
+            confirm=confirm, expected_etag=expected_etag)
+
+    async def set_wifi_network(self, network: str, *, band: str | None = None, enabled: bool | None = None,
+                               ssid: str | None = None, password: str | None = None,
+                               security: str | None = None, confirm: bool = False,
+                               expected_etag: str | None = None) -> dict[str, Any]:
+        def nets(state: dict[str, Any]) -> list[dict[str, Any]]:
+            if network == "primary":
+                return [state["primary"][b] for b in (list(WIFI_BANDS) if band in (None, "all") else [band])]
+            return [state[network]]
+
+        def plan(cur: dict[str, Any]) -> tuple[list[str], list[str], bool]:
+            errs: list[str] = [] if self.policy.allow_wifi else [
+                "Wi-Fi changes are disabled by policy (features.allow_wifi)"]
+            if network not in ("primary", "guest", "iot"):
+                return [*errs, "network must be primary, guest or iot"], [], False
+            if band not in (None, "all") and (network != "primary" or band not in WIFI_BANDS):
+                errs.append("band applies to the primary network only: 2.4GHz, 5GHz, 6GHz or all")
+            if ssid is not None and not 1 <= len(ssid.encode()) <= 32:
+                errs.append("ssid must be 1-32 bytes")
+            if password is not None and not (8 <= len(password) <= 63 and password.isascii()
+                                              and password.isprintable()):
+                errs.append("password must be 8-63 printable ASCII characters")
+            if security is not None and security not in ("wpa2", "wpa3", "wpa2wpa3"):
+                errs.append("security must be wpa2, wpa3 or wpa2wpa3")
+            if all(v is None for v in (enabled, ssid, password, security)):
+                errs.append("nothing to change")
+            if errs:
+                return errs, [], False
+            warns = ["the router restarts Wi-Fi: this call takes 1-2 minutes",
+                     "devices on this network reconnect; a new SSID or password means re-joining them"]
+            if network == "primary" and cur["mesh_enabled"] and band not in (None, "all"):
+                warns.append("mesh (SON) is on: the router keeps one SSID and password for 2.4 and 5 GHz, "
+                             "so this applies to both")
+            done = password is None and all(
+                (enabled is None or n["enabled"] == enabled) and (ssid is None or n["ssid"] == ssid)
+                and (security is None or n["security"] == security) for n in nets(cur))
+            return [], warns, done
+
+        async def verify(after: dict[str, Any]) -> bool:
+            ok = all((enabled is None or n["enabled"] == enabled) and (ssid is None or n["ssid"] == ssid)
+                     and (security is None or n["security"] == security) for n in nets(after))
+            if ok and password is not None:
+                ok = await self.b.wifi_secret_matches(network, band, password)
+            return ok
+
+        what = ", ".join(k for k, v in (("enabled", enabled), ("ssid", ssid), ("password", password),
+                                         ("security", security)) if v is not None)
+        return await self._change(
+            action=f"change {network} Wi-Fi ({what})", read_state=self.b.wifi_state, plan=plan,
+            apply=lambda: self.b.set_wifi_network(network, band=band, enabled=enabled, ssid=ssid,
+                                                  password=password, security=security),
+            verify=verify, confirm=confirm, expected_etag=expected_etag)
+
+    # -- LAN -----------------------------------------------------------------
+
+    async def set_lan(self, ip: str, mask: str = "255.255.255.0", dhcp_start: str | None = None,
+                      dhcp_end: str | None = None, lease_time_min: int | None = None,
+                      dhcp_enabled: bool = True, *, confirm: bool = False,
+                      expected_etag: str | None = None) -> dict[str, Any]:
+        """Move the router's LAN address / DHCP pool. When the address changes the session ends,
+        so the result reports where to reconnect instead of a read-back."""
+        try:
+            await self._ensure_firmware()
+            cur = await self.b.get_lan()
+            new = ipaddress.IPv4Interface(f"{ip}/{mask}")
+        except (RouterError, AuthError, ValueError) as e:
+            return self.env(False, errors=[str(e)], action="change LAN")
+        net = new.network
+        start = dhcp_start or str(net.network_address + 2)
+        end = dhcp_end or str(net.broadcast_address - 1)
+        lease = lease_time_min or cur.lease_time_min or 1440
+        state = {"lan": cur.model_dump(exclude={"reserved_range_note"})}
+        tag = etag(state)
+        errs: list[str] = []
+        if not self.policy.allow_lan_change:
+            errs.append("LAN changes are disabled by policy (features.allow_lan_change = false): "
+                        "this moves the router and every device on the network")
+        if new.ip in (net.network_address, net.broadcast_address):
+            errs.append(f"{ip} is not a usable host address in {net}")
+        try:
+            s4, e4 = ipaddress.IPv4Address(start), ipaddress.IPv4Address(end)
+        except ValueError as e:
+            return self.env(False, errors=[*errs, str(e)], action="change LAN")
+        if dhcp_enabled:
+            if s4 not in net or e4 not in net:
+                errs.append(f"DHCP pool {start}-{end} must be inside {net}")
+            if s4 > e4:
+                errs.append("DHCP pool start is after its end")
+            if s4 <= new.ip <= e4:
+                errs.append(f"the router's own address {ip} must be outside the DHCP pool")
+            if int(start.rsplit(".", 1)[1]) > 99 and int(end.rsplit(".", 1)[1]) < 151:
+                errs.append("the DHCP pool cannot lie entirely inside .100-.150 (reserved for Verizon devices)")
+            if not 1 <= lease <= 43200:
+                errs.append("lease time must be 1-43200 minutes")
+        moving = ip != cur.ip or mask != cur.mask
+        warns: list[str] = []
+        if moving:
+            warns.append(f"the router moves to https://{ip}/ - this MCP session ends; set FIOS_ROUTER_URL "
+                         f"(or url in config.toml) to https://{ip} and restart the MCP server")
+            warns.append("every device must renew its DHCP lease (or reconnect) to get an address in the new "
+                         "subnet; devices with static IPs must be changed by hand")
+            stranded: list[str] = []
+            for r in await self.b.list_reservations():
+                if ipaddress.IPv4Address(r.ip) not in net:
+                    stranded.append(f"reservation {r.mac} -> {r.ip}")
+            for f in await self.b.list_port_forwards():
+                if f.internal_ip and ipaddress.IPv4Address(f.internal_ip) not in net:
+                    stranded.append(f"port forward {f.name} -> {f.internal_ip}")
+            for rt in await self.b.list_static_routes():
+                if ipaddress.IPv4Address(rt.gateway) not in net:
+                    stranded.append(f"static route {rt.destination} via {rt.gateway}")
+            dmz = await self.b.get_dmz()
+            if dmz.enabled and dmz.ip and ipaddress.IPv4Address(dmz.ip) not in net:
+                stranded.append(f"DMZ host {dmz.ip} (the router disables DMZ)")
+            if stranded:
+                warns.append("these entries point outside the new subnet and will stop working until "
+                             "re-created with new addresses: " + "; ".join(stranded))
+        action = f"set LAN {ip}/{mask}, DHCP {f'{start}-{end}' if dhcp_enabled else 'off'}"
+        if errs:
+            return self.env(False, state, errors=errs, warnings=warns, action=action)
+        unchanged = (not moving and cur.dhcp_enabled == dhcp_enabled
+                     and (not dhcp_enabled or (cur.dhcp_start, cur.dhcp_end, cur.lease_time_min) == (start, end, lease)))
+        if unchanged:
+            return self.env(True, state, action=action, result="no_change")
+        if not confirm:
+            return self.env(True, state, warnings=warns, action=action, preview=True, state_etag=tag,
+                            next_step="call again with confirm=true and expected_etag=state_etag")
+        refused = self._writes_allowed()
+        if refused:
+            return self.env(False, errors=[refused], action=action)
+        if expected_etag != tag:
+            return self.env(False, state, action=action, state_etag=tag, errors=[
+                "conflict: router state changed since the preview (or no expected_etag given); preview again"])
+        try:
+            await self.b.set_lan(ip, mask, start, end, lease, dhcp_enabled)
+        except KeyError as e:
+            return self.env(False, action=action, errors=[f"router page no longer has field {e}; refusing"])
+        except Exception:
+            if not moving:
+                raise
+        if moving:
+            return self.env(True, action=action, warnings=warns, moved_to=f"https://{ip}", verified=None,
+                            result=("change sent; the router is moving. Reconnect at the new address "
+                                    "(after this machine has an address in the new subnet) to verify."))
+        after = await self.b.get_lan()
+        ok = (after.dhcp_enabled == dhcp_enabled
+              and (not dhcp_enabled or (after.dhcp_start, after.dhcp_end) == (start, end)))
+        return self.env(ok, after, action=action, verified=ok, warnings=warns,
+                        errors=[] if ok else ["write sent but read-back does not show the change"])

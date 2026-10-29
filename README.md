@@ -25,8 +25,8 @@ own local web interface. No cloud, no Verizon account, nothing leaves your LAN.
 - **Fail-closed on unknown firmware.** Writes are refused on firmware versions
   this tool has not been verified against.
 - **Dangerous operations don't exist.** No tools for factory reset, firmware
-  upgrade, admin password, remote administration, Wi-Fi changes or LAN subnet
-  changes.
+  upgrade, the admin password or remote administration. Moving the LAN is
+  off unless `policy.toml` allows it.
 - **TLS is pinned**, not disabled, and the router's admin sessions are used
   sparingly (one per process, logged out on exit).
 
@@ -35,12 +35,13 @@ own local web interface. No cloud, no Verizon account, nothing leaves your LAN.
 | Area | Tools |
 |---|---|
 | Status | `router_status`, `router_firmware`, `router_diagnostics`, `ping`, `read_router_page` (redacted raw view of any page), `get_policy` |
-| Devices | `list_connected_devices`, `list_dhcp_leases`, `list_arp_table`, `get_wifi_summary`, `list_blocked_devices`, `block_device`, `unblock_device` |
+| Devices | `list_connected_devices`, `list_dhcp_leases`, `list_arp_table`, `list_blocked_devices`, `block_device`, `unblock_device` |
+| Wi-Fi | `get_wifi_summary`, `set_wifi_radio`, `set_wifi_network` (primary / guest / IoT: on/off, SSID, password, security) |
 | Port forwarding | `list_port_forwarding`, `add_port_forwarding`, `delete_port_forwarding`, `set_port_forwarding_enabled` |
 | DHCP | `get_lan_settings`, `list_dhcp_reservations`, `add_dhcp_reservation`, `delete_dhcp_reservation` |
 | Routing & DNS | `list_static_routes`, `add_static_route`, `delete_static_route`, `get_dns_settings`, `set_dns_settings` |
 | Security | `get_firewall_settings`, `get_remote_admin_settings`, `get_dmz_settings`, `set_dmz`, `get_upnp_settings`, `set_upnp` |
-| System | `reboot_router` |
+| System | `reboot_router`, `set_lan_settings` (router address, mask, DHCP pool) |
 | Migration | `snapshot_config`, `list_snapshots`, `diff_config`, `check_desired_state`, `apply_desired_state` |
 
 Where a tool also exists in common TP-Link router MCP servers it has the same
@@ -64,6 +65,14 @@ name, so moving settings from one router to the other is a side-by-side job.
   IPv4 DNS is set manually. The DNS tools warn about this (`ipv6_dns_auto`);
   changing IPv6 DNS is not supported yet, so set it in the web UI or turn IPv6
   off on the WAN if every lookup must go through your chosen resolver.
+- **The LAN's `.100`–`.150` is handed to Verizon set-top boxes** (DHCP option
+  60) and moves with the subnet; the DHCP pool cannot sit entirely inside it.
+- **Wi-Fi saves take about 80 seconds**: the router holds the request open
+  until Wi-Fi has restarted. With mesh (SON) on — the default — the 2.4 GHz and
+  5 GHz networks share one SSID and password.
+- **Moving the LAN ends the session.** `set_lan_settings` previews every
+  reservation, forward, route or DMZ entry the new subnet would strand, then
+  reports the new address to point `FIOS_ROUTER_URL` at.
 - 20 static-route slots, 127 DHCP reservation slots, 128 port forwards.
 
 ## Install
@@ -143,7 +152,7 @@ and `diff_config` after show exactly what changed.
 
 | Firmware | Build date | Verified | Notes |
 |---|---|---|---|
-| 3.3.1.2 | 2024-12-19 | 2026-10-29 | every tool, on a bench router, with read-back |
+| 3.3.1.2 | 2024-12-19 | 2026-10-29 | every tool, on a bench router, with read-back (LAN moved away and back) |
 
 Running another version? Reads work; writes are refused until the contract
 test passes on it — please open an issue with the result.

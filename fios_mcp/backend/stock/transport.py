@@ -216,8 +216,11 @@ class RouterTransport:
         action: str = "",
         action_params: str = "",
         to: str = "apply_abstract.cgi",
+        timeout: float | None = None,
     ) -> httpx.Response:
-        """Write config fields by their opaque ids (from a fresh `get_cgi`)."""
+        """Write config fields by their opaque ids (from a fresh `get_cgi`).
+
+        `timeout`: some actions (a Wi-Fi restart) stall the router's web server."""
         async with self._lock:
             await self._ensure()
             form: dict[str, str] = {"token": self._form_token}
@@ -226,7 +229,8 @@ class RouterTransport:
             if action_params:
                 form["action_params"] = action_params
             form.update(fields)
-            r = await self._client.post(to, data=form)
+            r = await self._client.post(to, data=form,
+                                        timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT)
             if r.status_code >= 400:
                 raise RouterError(f"{to} -> HTTP {r.status_code}")
             return r

@@ -58,6 +58,10 @@ class MockRouter:
             "guest_ssid": "test-guest", "guest_enable": "0", "guest_security": "wpa2",
             "guest_password": "guest-secret",
             "iot_ssid": "test-iot", "iot_enable": "0", "iot_security": "wpa2", "iot_password": "iot-secret",
+            "Wireless_enable24G": "1", "Wireless_enable5G_H": "1", "Wireless_enable6G": "1", "mesh_enable": "1",
+            "lan_mask0": "255.255.255.0", "dhcp_ip": "192.168.1.1", "dhcp_mask": "255.255.255.0",
+            "dhcp_opt60_src_0_0": "192.168.1.100", "dhcp_opt60_dst_0_0": "192.168.1.150",
+            "dhcp_enable1": "1", "dhcp_enable2": "1", "dhcp_enable3": "1",
         }
         for i in range(128):
             for f in ("static_mac_", "static_ip_", "static_name_"):
@@ -86,7 +90,17 @@ class MockRouter:
         "status": ("lan_ip", "lan_mask", "wan_proto", "wan_dhcp4_addr", "wan_dhcp4_mask", "wan_dhcp4_gateway",
                    "wan_dns_enable", "dns_auto_enable", "wan_static_dns", "wan_ip4_dns",
                    "ip6wan_DnsAuto", "wan_ip6_dnslist", "wan_ip6_auto_dnslist"),
-        "net_connections": ("wan_dns_enable", "dns_auto_enable", "wan_static_dns", "lan_ip", "lan_mask"),
+        "net_connections": ("wan_dns_enable", "dns_auto_enable", "wan_static_dns", "lan_ip", "lan_mask",
+                            "lan_mask0", "dhcp_ip", "dhcp_mask", "dhcp_opt60_src_0_0", "dhcp_opt60_dst_0_0",
+                            "dhcp_enable0", "dhcp_enable1", "dhcp_enable2", "dhcp_enable3", "dhcp_start_ip",
+                            "dhcp_end_ip", "dhcp_lease_time"),
+        "wifi_channel_settings": ("Wireless_enable24G", "Wireless_enable5G_H", "Wireless_enable6G",
+                                  "wl_enable24G", "mesh_enable"),
+        "wifi_primary": ("Wireless_enable24G", "Wireless_enable5G_H", "Wireless_enable6G", "mesh_enable",
+                         "wl_enable24G", "wl_enable5G_H", "wl_enable6G", "wl_ssid24G", "wl_ssid5G_H",
+                         "wl_ssid6G", "sharedkey24G", "sharedkey5G_H", "sharedkey6G", "security_type24G",
+                         "security_type5G_H", "security_type6G"),
+        "wifi_guest": ("Wireless_enable24G", "guest_enable", "guest_ssid", "guest_password", "guest_security"),
         "dmz": ("firewall_dmz_enable", "firewall_dmz_ip", "firewall_dmz6_enable", "firewall_dmz6_mac",
                 "lan_ip", "lan_mask"),
         "upnp": ("upnp_enable", "upnp_autoclean"),
@@ -218,10 +232,19 @@ class MockRouter:
             return PlainTextResponse("", status_code=403)
         action, params = form.pop("action", ""), form.pop("action_params", "")
         form.pop("token", None)
+        changed = set()
         for fid, value in form.items():
             if fid not in self.ids:
                 return PlainTextResponse("unknown field", status_code=400)
             self.cfg[self.ids[fid]] = value
+            changed.add(self.ids[fid])
+        if self.cfg["mesh_enable"] == "1":  # SON keeps one SSID/key for 2.4 and 5 GHz
+            for f in ("wl_ssid", "sharedkey"):
+                if f + "24G" in changed:
+                    self.cfg[f + "5G_H"] = self.cfg[f + "24G"]
+                elif f + "5G_H" in changed:
+                    self.cfg[f + "24G"] = self.cfg[f + "5G_H"]
+        self.cfg["lan_mask"] = self.cfg["lan_mask0"]
         self.actions.append((action, params))
         if action == "ui_block_dev":
             mac, slot = params.split(",")

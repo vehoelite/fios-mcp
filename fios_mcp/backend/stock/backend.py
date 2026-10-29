@@ -48,7 +48,18 @@ MAX_PORT_FORWARDS = 128
 PAGES = ["arp", "bandwith", "basic", "bh_log", "diagnostics", "dmz", "dns_server", "dynamic_dns", "firewall_access_control", "firewall_general", "firewall_pinholes", "firewall_port_forward", "firewall_port_trigger", "firewall_static_nat", "firmware", "home", "ip_distribution", "ipv6", "ipv6_distribution", "known_devices", "lan_restore", "log", "ndp", "net_connections", "network_object", "ntp", "owl", "parental", "port_conf", "port_rule", "router_led", "routing", "scheduler", "sipalg", "status", "ui_admin", "ui_remote_admin", "upnp", "wan_mac_clone", "wifi_channel", "wifi_channel_history", "wifi_channel_settings", "wifi_guest", "wifi_iot", "wifi_primary", "wifi_qos", "wifi_wps", "zenreach"]
 
 # How long the web UI waits after each kind of save before reloading.
-WAIT = {"apply": 5.0, "dns": 16.0, "db": 3.0, "block": 4.0}
+WAIT = {"apply": 5.0, "dns": 16.0, "db": 3.0, "block": 4.0, "wifi": 3.0}
+
+WIFI_BANDS = {"2.4GHz": "24G", "5GHz": "5G_H", "6GHz": "6G"}
+WIFI_TIMEOUT = 180.0  # a Wi-Fi save holds the request open until the restart is done (~80 s seen)
+
+
+def _bands(band: str | None) -> list[str]:
+    if band in (None, "all"):
+        return list(WIFI_BANDS)
+    if band not in WIFI_BANDS:
+        raise RouterError(f"band must be one of {', '.join(WIFI_BANDS)} or 'all'")
+    return [band]
 
 
 def in_verizon_reserved_range(ip: str) -> bool:
@@ -161,20 +172,6 @@ class StockBackend:
         return [ArpEntry(ip=str(e.get("ip", "")), mac=str(e.get("mac", "")).upper(),
                          state=str(e.get("state", "")), interface=str(e.get("intf", "")))
                 for e in d.rod.get("dump_arp_list") or [] if isinstance(e, dict)]
-
-    async def wifi_summary(self) -> list[dict[str, Any]]:
-        h = await self.page("home")
-        nets = []
-        for band, suffix in (("2.4GHz", "24G"), ("5GHz", "5G_H"), ("6GHz", "6G")):
-            nets.append({"network": "primary", "band": band, "ssid": h.value(f"wl_ssid{suffix}"),
-                         "enabled": h.value(f"wl_enable{suffix}") == "1",
-                         "security": h.value(f"security_type{suffix}")})
-        nets.append({"network": "guest", "ssid": h.value("guest_ssid"),
-                     "enabled": h.value("guest_enable") == "1", "security": h.value("guest_security")})
-        iot = await self.page("wifi_iot")
-        nets.append({"network": "iot", "ssid": iot.value("iot_ssid"),
-                     "enabled": iot.value("iot_enable") == "1", "security": iot.value("iot_security")})
-        return nets
 
     # -- port forwarding ---------------------------------------------------
 
@@ -479,3 +476,87 @@ class StockBackend:
     async def reboot(self) -> None:
         await self.t.apply({}, action="ui_reboot_reason", action_params="1")
         await self.t.apply({}, action="reboot")
+
+    # -- Wi-Fi ---------------------------------------------------------------
+
+    async def wifi_state(self) -> dict[str, Any]:
+        """Radios and networks, without keys (see wifi_secret_matches)."""
+        r = await self.page("wifi_channel_settings")
+        p = await self.page("wifi_primary")
+        radios = {band: r.value(f"Wireless_enable{sfx}") == "1" for band, sfx in WIFI_BANDS.items()}
+        primary = {band: {"enabled": p.value(f"wl_enable{sfx}") == "1", "ssid": p.value(f"wl_ssid{sfx}"),
+                          "security": p.value(f"security_type{sfx}")} for band, sfx in WIFI_BANDS.items()}
+        g = await self.page("wifi_guest")
+        i = await self.page("wifi_iot")
+        return {
+            "radios": radios,
+            "mesh_enabled": p.value("mesh_enable") == "1",
+            "primary": primary,
+            "guest": {"enabled": g.value("guest_enable") == "1", "ssid": g.value("guest_ssid"),
+                      "security": g.value("guest_security")},
+            "iot": {"enabled": i.value("iot_enable") == "1", "ssid": i.value("iot_ssid"),
+                    "security": i.value("iot_security")},
+        }
+
+    async def wifi_secret_matches(self, network: str, band: str | None, password: str) -> bool:
+        """Compare a key without ever returning it."""
+        if network == "primary":
+            p = await self.page("wifi_primary")
+            return all(p.value(f"sharedkey{WIFI_BANDS[b]}") == password for b in _bands(band))
+        page, field = {"guest": ("wifi_guest", "guest_password"), "iot": ("wifi_iot", "iot_password")}[network]
+        return (await self.page(page)).value(field) == password
+
+    async def set_wifi_radio(self, band: str, enabled: bool) -> None:
+        d = await self.page("wifi_channel_settings")
+        await self.t.apply({d.cfg[f"Wireless_enable{WIFI_BANDS[b]}"].id: "1" if enabled else "0"
+                            for b in _bands(band)}, action="ui_wireless_single", timeout=WIFI_TIMEOUT)
+        await self._wait("wifi")
+
+    async def set_wifi_network(self, network: str, *, band: str | None = None, enabled: bool | None = None,
+                               ssid: str | None = None, password: str | None = None,
+                               security: str | None = None) -> None:
+        if network == "primary":
+            d = await self.page("wifi_primary")
+            fields: dict[str, str] = {}
+            for b in _bands(band):
+                sfx = WIFI_BANDS[b]
+                for name, value in ((f"wl_enable{sfx}", None if enabled is None else ("1" if enabled else "0")),
+                                    (f"wl_ssid{sfx}", ssid), (f"sharedkey{sfx}", password),
+                                    (f"security_type{sfx}", security)):
+                    if value is not None:
+                        fields[d.cfg[name].id] = value
+            await self.t.apply(fields, action="ui_wireless_single", timeout=WIFI_TIMEOUT)
+        else:
+            page, prefix = {"guest": ("wifi_guest", "guest"), "iot": ("wifi_iot", "iot")}[network]
+            d = await self.page(page)
+            fields = {}
+            for name, value in ((f"{prefix}_enable", None if enabled is None else ("1" if enabled else "0")),
+                                (f"{prefix}_ssid", ssid), (f"{prefix}_password", password),
+                                (f"{prefix}_security", security)):
+                if value is not None:
+                    fields[d.cfg[name].id] = value
+            await self.t.apply(fields, action="ui_wireless_singleradio", action_params="1", timeout=WIFI_TIMEOUT)
+        await self._wait("wifi")
+
+    # -- LAN -----------------------------------------------------------------
+
+    async def set_lan(self, ip: str, mask: str, dhcp_start: str, dhcp_end: str, lease_time_min: int,
+                      dhcp_enabled: bool) -> None:
+        """Change the router's LAN address / DHCP pool, exactly as the web UI does.
+
+        When the address changes, the router moves and this session ends."""
+        d = await self.page("net_connections")
+        base = ip.rsplit(".", 1)[0]
+        values = {
+            "lan_ip": ip, "dhcp_ip": ip, "lan_mask0": mask, "dhcp_mask": mask,
+            # Verizon set-top boxes (DHCP option 60) get .100-.150 of the LAN.
+            "dhcp_opt60_src_0_0": f"{base}.100", "dhcp_opt60_dst_0_0": f"{base}.150",
+        }
+        flag = "1" if dhcp_enabled else "0"
+        values.update({f"dhcp_enable{n}": flag for n in range(4)})
+        if dhcp_enabled:
+            values.update({"dhcp_start_ip": dhcp_start, "dhcp_end_ip": dhcp_end,
+                           "dhcp_lease_time": str(lease_time_min)})
+        # net_para: <bridge mode changed><LAN/DHCP settings changed><bridge mode on>
+        await self.t.apply({d.cfg[k].id: v for k, v in values.items() if k in d.cfg},
+                           action="ui_verizon_network_settings", action_params="010")

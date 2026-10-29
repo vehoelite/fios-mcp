@@ -31,7 +31,9 @@ Changes are two-phase: call a write tool without confirm to get a preview and
 state_etag, show the preview to the user, then call again with confirm=true and
 expected_etag. Never confirm a change the user has not seen. Wi-Fi keys and
 passwords are always redacted. On this router DHCP reservations in .100-.150
-are reserved for Verizon devices and are refused.
+are reserved for Verizon devices and are refused. Wi-Fi changes make the router
+restart Wi-Fi and take 1-2 minutes to return. Moving the LAN (set_lan_settings)
+ends the session: tell the user the new address to reconnect to.
 """
 
 READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
@@ -163,8 +165,35 @@ async def list_arp_table() -> dict[str, Any]:
 
 @mcp.tool(annotations=READ)
 async def get_wifi_summary() -> dict[str, Any]:
-    """SSIDs, enabled state and security type of the primary, guest and IoT networks (no keys)."""
-    return await _read("wifi_summary")
+    """Physical radios per band, mesh state, and the primary/guest/IoT networks (SSID, on/off,
+    security). Never includes keys."""
+    return await _read("wifi_state")
+
+
+@mcp.tool(annotations=WRITE)
+async def set_wifi_radio(band: Literal["2.4GHz", "5GHz", "6GHz", "all"], enabled: bool, confirm: bool = False,
+                         expected_etag: str | None = None) -> dict[str, Any]:
+    """Turn a physical Wi-Fi radio on or off (e.g. when another access point serves Wi-Fi).
+    Two-phase; the router restarts Wi-Fi, so confirming takes 1-2 minutes."""
+    return await _svc().set_wifi_radio(band, enabled, confirm=confirm, expected_etag=expected_etag)
+
+
+@mcp.tool(annotations=WRITE)
+async def set_wifi_network(
+    network: Literal["primary", "guest", "iot"],
+    band: Literal["2.4GHz", "5GHz", "6GHz", "all"] | None = None,
+    enabled: bool | None = None,
+    ssid: str | None = None,
+    password: str | None = None,
+    security: Literal["wpa2", "wpa3", "wpa2wpa3"] | None = None,
+    confirm: bool = False,
+    expected_etag: str | None = None,
+) -> dict[str, Any]:
+    """Change a Wi-Fi network: on/off, SSID, password (8-63 chars) and/or security. `band` is
+    for the primary network only (default: all bands). The password is checked by read-back
+    but never returned. Two-phase; confirming takes 1-2 minutes."""
+    return await _svc().set_wifi_network(network, band=band, enabled=enabled, ssid=ssid, password=password,
+                                         security=security, confirm=confirm, expected_etag=expected_etag)
 
 
 @mcp.tool(annotations=READ)
@@ -367,6 +396,26 @@ async def set_upnp(enabled: bool, confirm: bool = False, expected_etag: str | No
 async def reboot_router(confirm: bool = False) -> dict[str, Any]:
     """Reboot the router (~4 minutes of downtime). Without confirm, only previews."""
     return await _svc().reboot(confirm=confirm)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def set_lan_settings(
+    ip: str,
+    mask: str = "255.255.255.0",
+    dhcp_start: str | None = None,
+    dhcp_end: str | None = None,
+    lease_time_min: int | None = None,
+    dhcp_enabled: bool = True,
+    confirm: bool = False,
+    expected_etag: str | None = None,
+) -> dict[str, Any]:
+    """Change the router's LAN address, mask and DHCP pool (needs features.allow_lan_change).
+
+    The preview lists reservations, forwards, routes and DMZ entries the new subnet would strand.
+    If the address changes the router moves and this session ends: the result gives the new URL;
+    the MCP server must be restarted with FIOS_ROUTER_URL pointing there. Two-phase."""
+    return await _svc().set_lan(ip, mask, dhcp_start, dhcp_end, lease_time_min, dhcp_enabled,
+                                confirm=confirm, expected_etag=expected_etag)
 
 
 # -- snapshots & desired state -----------------------------------------------

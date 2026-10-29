@@ -27,6 +27,16 @@ from pathlib import Path
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from fios_mcp.backend.stock.transport import RouterTransport, tls_context
+from fios_mcp.config import Config
+
+
+async def _read_key() -> str:
+    """The 2.4 GHz key, read directly so the test can restore it (the MCP never returns keys)."""
+    cfg = Config.load()
+    async with RouterTransport(cfg.url, cfg.password, verify=tls_context(cfg.pin_file)) as t:
+        return (await t.get_cgi("wifi_primary")).value("sharedkey24G")
+
 FAKE1, FAKE2 = "02:00:00:00:00:41", "02:00:00:00:00:42"
 results: list[tuple[str, bool]] = []
 
@@ -113,6 +123,25 @@ async def main(tmp: Path) -> int:
         snap = await call(s, "snapshot_config")
         check("snapshot + empty diff", (await call(s, "diff_config", snapshot_a=snap["snapshot_id"]))["data"] == {})
         check("reboot only previews", (await call(s, "reboot_router")).get("preview"))
+        check("lan change refused by default policy",
+              not (await call(s, "set_lan_settings", ip=host(1)))["ok"])
+
+        # Wi-Fi: each confirmed change restarts Wi-Fi on the router (~80 s).
+        wifi = (await call(s, "get_wifi_summary"))["data"]
+        six = wifi["radios"]["6GHz"]
+        check("6GHz radio toggled", (await two_phase(s, "set_wifi_radio", band="6GHz", enabled=not six)).get("verified"))
+        check("6GHz radio restored", (await two_phase(s, "set_wifi_radio", band="6GHz", enabled=six)).get("verified"))
+        guest = wifi["guest"]["enabled"]
+        check("guest toggled", (await two_phase(s, "set_wifi_network", network="guest", enabled=not guest)).get("verified"))
+        check("guest restored", (await two_phase(s, "set_wifi_network", network="guest", enabled=guest)).get("verified"))
+        orig_ssid = wifi["primary"]["2.4GHz"]["ssid"]
+        orig_key = await _read_key()  # straight from the router, kept in memory only
+        out = await two_phase(s, "set_wifi_network", network="primary", band="2.4GHz", ssid="mcptest-ssid",
+                              password="mcptest-pass-123")
+        check("primary ssid+key changed (key verified)", out.get("verified") and "mcptest-pass-123" not in json.dumps(out), out)
+        out = await two_phase(s, "set_wifi_network", network="primary", band="2.4GHz", ssid=orig_ssid,
+                              password=orig_key)
+        check("primary ssid+key restored", out.get("verified"))
         diag = await call(s, "router_diagnostics")
         print("router logins used:", diag["server"]["logins_this_process"])
     passed = sum(ok for _, ok in results)

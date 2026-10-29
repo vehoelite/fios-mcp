@@ -12,9 +12,11 @@
     allow_dmz = false        # a DMZ host receives every unsolicited port
     allow_reboot = true
     allow_block = true
+    allow_wifi = true        # radios, SSIDs, Wi-Fi passwords
+    allow_lan_change = false # moving the router's LAN address / DHCP pool
 
 With no policy file the defaults are conservative: DNS changes are refused
-until an allowlist exists, and DMZ is refused.
+until an allowlist exists, DMZ is refused and the LAN cannot be moved.
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ class Policy:
     allow_dmz: bool = False
     allow_reboot: bool = True
     allow_block: bool = True
+    allow_wifi: bool = True
+    allow_lan_change: bool = False
     source: str = "defaults (no policy.toml)"
 
     @classmethod
@@ -61,6 +65,8 @@ class Policy:
             allow_dmz=bool(feat.get("allow_dmz", False)),
             allow_reboot=bool(feat.get("allow_reboot", True)),
             allow_block=bool(feat.get("allow_block", True)),
+            allow_wifi=bool(feat.get("allow_wifi", True)),
+            allow_lan_change=bool(feat.get("allow_lan_change", False)),
             source=str(path),
         )
 
@@ -74,4 +80,6 @@ class Policy:
             "allow_dmz": self.allow_dmz,
             "allow_reboot": self.allow_reboot,
             "allow_block": self.allow_block,
+            "allow_wifi": self.allow_wifi,
+            "allow_lan_change": self.allow_lan_change,
         }

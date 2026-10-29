@@ -167,6 +167,34 @@ with `loginStatus.cgi` (`islogin == "1"`).
   (600 s), `http_maxFailTimes`. A client that never logs out exhausts the
   sessions within minutes — **always `POST logout.cgi` when done.**
 
+### Verified: Wi-Fi (2026-10-29)
+
+| What | Page (ids) | Fields | Action |
+|---|---|---|---|
+| Physical radios | `wifi_channel_settings` | `Wireless_enable24G`, `Wireless_enable5G_H`, `Wireless_enable6G` | `ui_wireless_single` |
+| Primary network | `wifi_primary` | `wl_enable*`, `wl_ssid*`, `sharedkey*`, `security_type*` (suffix `24G`, `5G_H`, `6G`) | `ui_wireless_single` |
+| Guest | `wifi_guest` | `guest_enable`, `guest_ssid`, `guest_password`, `guest_security` | `ui_wireless_singleradio`, params `1` |
+| IoT | `wifi_iot` | `iot_enable`, `iot_ssid`, `iot_password`, `iot_security` | `ui_wireless_singleradio`, params `1` |
+
+- Keys are posted in clear (over the router's TLS); no client-side encryption.
+- `ui_wireless_singleradio` params are a band bitmask: 1 = 2.4 GHz, 2 = 5 GHz, 4 = 6 GHz.
+- **A Wi-Fi save holds the HTTP request open until Wi-Fi has restarted: ~80 s.**
+- `mesh_enable` (SON) on: changing the 2.4 GHz SSID/key also changes 5 GHz.
+- Security values: `wpa2`, `wpa3`, `wpa2wpa3`.
+
+### Verified: LAN address / DHCP pool (2026-10-29)
+
+Ids from `net_connections`; `action=ui_verizon_network_settings`,
+`action_params` = 3 flags `<bridge mode changed><LAN/DHCP changed><bridge on>`
+→ `"010"`. Fields: `lan_ip`, `dhcp_ip` (= LAN IP), `lan_mask0`, `dhcp_mask`,
+`dhcp_enable0..3`, `dhcp_start_ip`, `dhcp_end_ip`, `dhcp_lease_time` (minutes,
+1–43200), and `dhcp_opt60_src_0_0` / `dhcp_opt60_dst_0_0` = `<net>.100` /
+`<net>.150` — the **DHCP option-60 range for Verizon set-top boxes**, which is
+why reservations there are never honoured. UI rules: router IP outside the
+pool; pool not entirely inside .100–.150. Moved 192.168.1.1 → 192.168.50.1 and
+back on the bench: the request times out as the router moves, clients must
+renew, the pinned certificate is unchanged.
+
 ## Sensitive fields
 
 Several pages return Wi-Fi credentials in clear text — e.g. `cgi_home`:

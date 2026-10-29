@@ -15,3 +15,5 @@ static_routes = ["10.99.0.0/24"]
 allow_dmz = false      # a DMZ host receives every unsolicited port from the internet
 allow_reboot = true    # still needs confirm=true
 allow_block = true
+allow_wifi = true          # radios, SSIDs, Wi-Fi passwords (each change still needs confirm)
+allow_lan_change = false   # moving the router's LAN address / DHCP pool
