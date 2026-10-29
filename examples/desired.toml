@@ -1,0 +1,35 @@
+# What the router should hold. check_desired_state lists what is missing or
+# different; apply_desired_state fixes those items (never removes extras).
+
+[dns]
+mode = "manual"
+servers = ["1.1.1.1", "1.0.0.1"]   # must also be in policy.toml's allowlist
+
+[[reservations]]
+mac = "02:00:00:00:00:10"
+ip = "192.168.1.10"     # not .100-.150: reserved for Verizon devices on the CR1000A
+name = "nas"
+
+[[reservations]]
+mac = "02:00:00:00:00:11"
+ip = "192.168.1.11"
+name = "vpn-server"
+
+[[port_forwards]]
+name = "vpn-sstp"
+protocol = "tcp"
+external_ports = ["443"]
+internal_ip = "192.168.1.11"
+
+[[port_forwards]]
+name = "vpn-ike"
+protocol = "udp"
+external_ports = ["500", "4500"]
+internal_ip = "192.168.1.11"
+
+[[static_routes]]
+destination = "10.99.0.0/24"   # e.g. a VPN client pool behind the VPN server
+gateway = "192.168.1.11"
+
+[upnp]
+enabled = false

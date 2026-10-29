@@ -1,0 +1,17 @@
+# ~/.config/fios-mcp/policy.toml  (chmod 600)
+# Guard-rails the MCP server enforces no matter what it is asked to do.
+
+[dns]
+# Manual WAN DNS may only be set to these. Empty = DNS changes refused.
+allowed_servers = ["1.1.1.1", "1.0.0.1"]
+
+[protect]
+# Never deleted or changed by the tools.
+reservations = ["02:00:00:00:00:10", "192.168.1.10"]   # MACs or IPs
+port_forwards = ["vpn", "443/tcp"]                      # names or port/protocol
+static_routes = ["10.99.0.0/24"]
+
+[features]
+allow_dmz = false      # a DMZ host receives every unsolicited port from the internet
+allow_reboot = true    # still needs confirm=true
+allow_block = true

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fios-mcp"
+version = "0.1.0.dev0"
+description = "MCP server for the Verizon Fios CR1000A router's local web interface"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "vehoelite" }]
+keywords = ["mcp", "verizon", "fios", "cr1000a", "router"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Networking",
+]
+dependencies = [
+  "mcp>=2.3",
+  "httpx>=0.28",
+  "pydantic>=2.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/vehoelite/fios-mcp"
+Issues = "https://github.com/vehoelite/fios-mcp/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+
+[project.scripts]
+fios-mcp = "fios_mcp.cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["contract: talks to a real router (opt-in via FIOS_MCP_CONTRACT_URL)"]
+addopts = "-m 'not contract'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
